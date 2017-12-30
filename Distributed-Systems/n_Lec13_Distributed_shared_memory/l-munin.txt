@@ -1,0 +1,221 @@
+6.824 2017 Lecture 13: Munin distributed shared memory
+
+Today: Distributed computing
+  The Big Idea: your huge computation on a room full of cheap computers!
+    Instead of one big, expensive shared-memory multiprocessor
+    Today: data-center clusters with many inexpensive shared-memory multiprocessors
+  An old and difficult goal; many approaches; much progress; still hot.
+    Other cluster computing papers: MapReduce, Spark
+
+Why Munin paper?
+  Distributes shared memory is an interesting idea
+    Most popular topic for projects in 6.824
+  Large literature on distributed-shared memory systems
+    This paper one of the earlier ones
+      Software lazy-release consistency (introduced by the paper)
+  Software artifact itself not influential, but DSM ideas are
+
+Distributed shared memory (DSM)
+  DMS provides the illusion of shared memory on distributed system
+  You all know how to write parallel (threaded) Go programs
+  Let's farm the threads out to a big cluster of machines!
+  What's missing? shared memory!
+
+DSM plan:
+  Programmer writes parallel program: threads, shared variables, locks, &c
+  DSM system farms out threads to a cluster of machines
+  DSM system creates illusion of single shared memory
+  [diagram: LAN, machines w/ RAM]
+
+DSM advantages
+  familiar model -- shared variables, locks, &c
+  general purpose (compared to e.g. MapReduce and Spark)
+  can use existing apps and libraries written for multiprocessors
+  lots of machines on a LAN much cheaper than huge multiprocessor
+
+But:
+  machines on a LAN don't actually share memory
+
+General DSM approach (but slow):
+  The "conventional" pattern in the Munin paper
+  Use hardware's virtual memory protection (r/w vs r/o vs invalid)
+  General idea illustrated with 2 machines:
+     Part of the address space starts out on M0
+	On M1, marked invalid 
+     Part of the address space start out on M1
+        On M0, marked invalid
+  A thread of the application on M1 may refer to an address that lives on M0
+    If thread LD/ST to that "shared" address, M1's hardware will take a page fault
+       Because page is marked invalid
+    OS propagates page fault to DSM runtime
+    DSM runtime can fetch page from M0
+    DSM on M0, marks page invalid, and sends page to M1
+    DSM on M1 receives it from M0, copies it to underlying physical memory
+    DSM on M1 marks the page valid
+    DSM returns from page fault handler
+    Hardware retries LD/ST
+  Runs threaded code w/o modification
+    e.g. matrix multiply, physical simulation (e.g., SOR), sort
+
+Challenges:
+  Memory consistency model (does memory act like programmers expect it to act?)
+    What result does a read observe?
+    The last write?
+    Stale data?
+  Performance (is it fast?)
+
+Example:
+  x and y start out = 0
+  thread 0:
+    x = 1
+    if y == 0:
+      print yes
+  thread 1:
+    y = 1
+    if x == 0:
+      print yes
+
+Would it be OK if both threads printed yes?
+  What is the outcome using the general approach?
+  Is it even possible to have both threads print "yes"?
+  Could they both print "yes" if this were a Go program?
+    How could that happen?
+    Why is that allowed?
+
+Conventional approach provides strong consistency
+  We don't care much about the specific definition (often very technical)
+  We do care about the general notion of strong consistency,
+    both for the papers that deliver it (or don't) and for Lab 3
+    
+What are we looking for in strong consistency?
+  We want the replication system to behave like an unreplicated one
+    If client 1 calls ST and it completes, and then client 2's LD must see the ST
+    Makes sense for if each call is sequential (one at the time)
+      a one-at-a-time sequence sees the updates of its predecessors
+  One interesting case left: concurrent operations
+    LDs and STs start about the same time and their execution overlap
+    Strong consistency in that case:
+      The return values and updated state after a set of concurrent operations must be the same as
+      if the operations had executed one at a time in some order
+
+You have seen lots of refinements of this basic idea of strong consistency
+   linearizable and sequentially consistent (for simple reads and writes)
+   serializable and strictly serializable (for multi-step transactions).
+   In this class we will not worry much about the detailed differences.
+  
+Main trade-off in consistency models
+  Lax model => greater freedom to optimize
+    I.e., send fewer messages, wait less for responses, etc.
+  Strict model => matches programmer intuition (e.g. read sees latest write)
+  This tradeoff is a huge factor in many designs
+
+Munin: a case study of DSM
+  Software release consistency
+    Not unlike Go's memory model
+  Optimized implementations for particular sharing patterns
+    read-only
+    write-shared
+    producer consumer
+
+Munin high level goals?
+  Better DSM performance than conventional
+  Run existing parallel code
+
+What specific problems with previous DSM are they trying to fix?
+  false sharing: two machines r/w different vars on same page
+    M1 writes x, M2 writes y
+    M1 writes x, M2 just reads y
+    Q: what does the conventional approach do in this situation?
+  write amplification: a one byte write turns into a whole-page transfer
+
+First goal: eliminate write amplification
+  don't send whole page, just written bytes
+
+Big idea: write diffs
+  on M1 write fault:
+    tell other hosts to invalidate but keep hidden copy
+    M1 makes hidden copy as well
+  on M2 fault:
+    M2 asks M1 for recent modifications
+    M1 "diffs" current page against hidden copy
+    M1 send diffs to M2 (and all machines w/ copy of this page)
+    M2 applies diffs to its hidden copy
+    M1 marks page r/o
+
+Q: do write diffs change the consistency model?
+   At most one writeable copy, so writes are ordered
+   No writing while any copy is readable, so no stale reads
+   Readable copies are up to date, so no stale reads
+   Still sequentially consistent
+
+Q: do write diffs fix false sharing?
+
+Next goal: allow multiple readers+writers
+  to cope with false sharing
+  => don't invalidate others when a machine writes
+  => don't demote writers to r/o when another machine reads
+  => multiple *different* copies of a page!
+     which should a reader look at?
+  diffs help: can merge writes to same page
+  but when to send the diffs?
+    no invalidations -> no page faults -> what triggers sending diffs?
+
+Big idea: release consistency (RC)
+  no-one should read data w/o holding a lock!
+    so let's assume a lock server
+  send out write diffs on release
+    to *all* machines with a copy of the written page(s)
+
+Example 1 (RC and false sharing)
+x and y are on the same page
+M0: a1 for(...) x++ r1
+M1: a2 for(...) y++ r2  a1 print x, y r1
+What does RC do?
+  M0 and M1 both get cached writeable copy of the page
+  during release, each computes diffs against original page,
+    and sends them to all copies
+  M1's a1 causes it to wait until M0's release
+    so M1 will see M0's writes
+
+Q: what is the performance benefit of RC?
+   What does the conventional approach do with Example 1?
+   multiple machines can have copies of a page, even when 1 or more writes
+   => no bouncing of pages due to false sharing
+   => read copies can co-exist with writers
+
+Q: does RC change the consistency model? yes!
+   M1 won't see M0's writes until M0 releases a lock
+   I.e. M1 can see a stale copy of x; not possible w/ general approach
+   if you always lock: locks force order -> no stale reads
+
+Q: does RC make sense without write diffs?
+   probably not: diffs needed to reconcile concurrent writes to same page
+
+Q: how to determine to which machines to send diff too?
+   any machine that has a copy of the page must see diffs
+   producer-consumer optimization limits the page to producer and consumer
+
+Performance?
+  Table 3 and 4
+    DSM performance is similar to hand-coded message passing version
+  How important are the optimizations?
+    Table 6 suggest they are important
+    But not 100% clear
+      a better copyset could may have producer-consumer insignificant for SOR?
+
+What happened to DSM?
+  The cluster approach was a great idea
+  Targeting *existing* threaded code was not a long-term win
+  Overtaken by MapReduce and successors
+    MR tolerates faults
+    MR guides programmer to good split of data and computation
+    BUT people have found MR too rigid for many parallel tasks
+  The last word has not been spoken here
+    Much recent work on flexible memory-like cluster programming models
+    For example, Spark (see Thursday's paper)
+
+References
+ http://www.bailis.org/blog/linearizability-versus-serializability/
+ http://www.bailis.org/blog/understanding-weak-isolation-is-a-serious-problem/
+ https://aphyr.com/posts/313-strong-consistency-models
+ https://www.microsoft.com/en-us/research/publication/replicated-data-consistency-explained-through-baseball/

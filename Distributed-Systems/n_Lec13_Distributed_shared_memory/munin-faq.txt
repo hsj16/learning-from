@@ -1,0 +1,123 @@
+Q: Why are we reading this paper? Do people use Munin today?
+
+A: We're reading the paper for its ideas, not because of the Munin
+software artifact, which had little impact, I think.
+
+Few people design cluster-computing systems that provide the illusion
+of shared memory. Instead, people design systems such as MapReduce and
+Spark that don't allow you to run your existing shared-memory code but
+are good for specific application domains.
+
+The ideas from DSM systems, however, are influential. For example, if
+you squint a bit, Go's memory model is not unlike release consistency.
+
+Q: Are there situations where sequential consistency is preferable
+to release consistency?
+
+A: Yes. If you to want to write lock-free programs (e.g., sharing
+variables without protecting with locks), you probably want a memory
+model that allows you to reason about the effects of load/stores on
+shared variables without locks (e.g., sequential consistency).
+
+Q: Which is a better programming model for distributed systems, shared
+memory or message passing?
+
+A: This is a long-standing debate in the parallel-computing community
+and there is no agreed answer. The general argument is that shared
+memory applications are easier to program but message-passing programs
+can be made more efficient because the programmer can orchestrate the
+communication.
+
+Q: What is the Dash system mentioned in the Munin paper?
+
+A: DASH is a hardware multiprocessor; that is, it implemented release
+consistency as part of the hardware memory-coherence system. Munin is
+a software implementation of release consistency for distributed
+shared memory on clusters of separate computers connected by a LAN.
+
+Q: Does RMDA obsolete systems like Munin?
+
+A: RDMA is a technique that one can use to speed up DSM systems, but
+RDMA by itself isn't sufficient. You will still want to make
+read/writes local to the processor (i.e., caching objects) because
+those reads and writes are much faster than doing an RDMA operation.
+If you do caching, you need a consistency protocol (e.g., release
+consistency).
+
+People built DSM systems that exploited fast remote read/writes in the
+early days of DSM systems. For example, look at Shrimp from Princeton.
+
+Q: What does the paper mean by a "write miss"?
+
+A: "Write miss" refers to the scenario where a thread attempts to
+write a shared-memory location, but the virtual-memory page holding
+that location isn't mapped into the address space of the thread. This
+results in a page fault, which the OS propagates to the Munin runtime.
+In the conventional DSM implementation, the runtime then fetches the
+page from another machine and maps it into the thread's address space.
+
+Q: What's the difference between "release consistency" and "strong
+consistency"?
+
+A: In strong consistency, a load from an address won't return stale
+data. With release consistency, it is possible that a load returns
+stale data, namely when the program hasn't protected accesses to
+shared object with locks.
+
+Q: What kinds of access patterns don't fall into Munin's annotation
+categories?
+
+A: Munin works correctly as long your program has the appropriate
+synchronization. The annotations just make the program run faster. I
+imagine that if they needed additional annotations for patterns that the
+authors hadn't seen yet in application, they could add them.
+
+Q: When a read is performed on a variable in a node, does the node
+always end up with a local copy of the object? Does this cause more
+and more replicas to be created?
+
+A: Yes. To be able to read an object, Munin will map a copy of the
+page containing that object into the address space of the reader.
+
+Replicas will be created when a thread reads the object. If an object is
+shared only between 2 machines, then the 2 machines have a copy of
+object. If an object is widely shared (i.e., each machine reads it), then
+each machine will have a copy of the page.
+
+Q: Would it be easy to add fault tolerance to Munin?
+
+A: I don't think so. The typical way fault-tolerance is done in DSM
+systems is to do periodic checkpointing. If a failure happens, then
+the system restarts the application from the last checkpoint.
+
+Spark (the reading for Thursday) has a more sophisticated plan, but it
+doesn't have mutable shared data structures.
+
+Q: What if a program reads or writes shared data without a lock?
+
+A: It is the programmer's job to make sure that shared variables are
+protected by locks, and then Munin will do the right thing. This is
+not unlike Go: if you forget to put in synchronization (locks,
+channels, etc.) around shared variables, then a read may see
+stale values and the program may compute the wrong result.
+
+Q: How does DUO mitigate false sharing?
+
+A: False sharing refers to the case where unrelated variables x and
+y end up on the same virtual-memory page. If one thread writes x and
+another thread writes y, then the page holding x and y will be
+ping-ponging between the two threads, even though the two threads
+don't share x and y with each other.
+
+The challenge here is that DSM systems shares pages but threads share
+variables that may end up on the same page. Annotations, diff-ing, and
+DUQ address this challenge.
+
+Q: What does it mean to have synchronization visible to the runtime
+system?
+
+A: It means that the application must use the synchronization primitives
+provided by Munin. That is, a program shouldn't implement its own locks
+and use its own locks for synchronization. In the latter case, Munin won't
+know about those locks, and cannot provide software release
+consistency.

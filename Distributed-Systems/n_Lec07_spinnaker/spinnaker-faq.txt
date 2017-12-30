@@ -1,0 +1,101 @@
+Spinnaker FAQ
+Q: What is timeline consistency?
+A: It means that all writes are in some total order, but that Gets()
+are allowed to return the value of an earlier Put instead of the last
+one.
+
+Q: When there is only 1 node up in the cohort, the paper says it’s
+still timeline consistency; how is that possible?
+
+A: Timeline consistency allows the system to return stale values: a
+get can return a value that was written in the past, but is not the
+most recent one. Thus, if a server is partitioned off from the
+majority, and perhaps has missed some Puts, it can still execute a Get
+if the Get doesn't have to be strongly consistent.
+
+Q: What are the trade-offs of the different consistency levels?
+
+A: Strongly-consistent systems are easier to program because they behave
+like a non-replicated systems. Building applications on top of
+eventually-consistent systems is generally more difficult because the
+programmer must consider scenarios that couldn't come up in a
+non-replicated system. Furthermore, certain applications just
+require strong consistency.
+
+Q: What is the CAP theorem about?
+
+A: The CAP theorem captures the intuition that it is difficult to
+achieve consistency, availability, and partition tolerance at the same
+time. The reason is to handle partitions and achieve consistency there
+are situations where the system cannot make progress (thus reducing
+availability), because there is no majority. For example, in Raft, if
+the leader election fails because there is no majority in any
+partition, then Raft cannot process new client requests.
+
+Q: Could Spinnaker use Raft as the replication protocol rather than Paxos?
+
+A: Although the details are slightly different, my thinking is that
+they are interchangeable to first order. The main reason that we
+reading this paper is as a case study of how to build a complete
+system using a replicated log. It is similar to lab 3 and lab 4,
+except you will be using your Raft library.
+
+Q: The paper mentions Paxos hadn't previously been used for database
+replication. What was it used for?
+
+A: Paxos was not often used at all until recently. By 2011 most uses
+were for configuration services (e.g., Google's Chubby or Zookeeper),
+but not to directly replicate data.
+
+Q: What is the reason for logical truncation?
+
+A: The logical truncation exists because Spinnaker merges logs of 3
+cohorts into a single physical log for performance on magnetic disks.
+This complicates log truncation, because when one cohort wants to
+truncate the log there maybe log entries from other cohorts, which it
+cannot truncate. So, instead of truncating the log, it remembers its
+entries that are truncated in a skip list. When the cohort recovers,
+and starts replaying log entries from the beginning of the log, it
+skips the entries in the skip list, because they are already present
+in the last checkpoint of memtables.
+
+Q: What exactly is the key range (i.e. 'r') defined in the paper for
+leader election?
+
+A: One of the key ranges of a shard (e.g., [0,199] in figure 2).
+
+Q: Is there a more detailed description of Spinnaker's replication
+protocol somewhere?
+
+A: http://www.vldb.org/2011/files/slides/research15/rSession15-1.ppt
+
+Q: How does Spinnaker's leader election ensure there is at most one leader?
+
+A: The new leader is the candidate with the max n.lst in the Zookeeper
+under /r/candidates, using Zookeeper sequence numbers to break ties.
+
+Q: Does Spinnaker have something corresponding to Raft's terms?
+
+Yes, it has epoch numbers (see appendix B).
+
+Q: Section 9.1 says that a Spinnaker leader replies to a consistent
+read without consulting the followers. How does the leader ensure that
+it is still the leader, so that it doesn't reply to a consistent read
+with stale data?
+
+A: Unclear. Maybe the leader learns from Zookeeper that it isn't the
+leader anymore, because some lease/watch times out.
+
+Q: Would it be possible to replace the use of Zookeeper with a
+Raft-like leader election protocol?
+
+A: Yes, that would be a very reasonable thing to do. My guess is that
+they needed Zookeeper for shard assignment and then decided to also
+use it for leader election.
+
+Q: What is the difference between a forced and a non-forced log write?
+
+A: After a forced write returns, then it is guaranteed that the data
+is on persistent storage. After a non-forced write returns, the write
+to persistent storage has been issued, but may not yet be on
+persistent storage.

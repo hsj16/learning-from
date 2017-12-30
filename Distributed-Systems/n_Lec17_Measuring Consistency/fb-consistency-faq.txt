@@ -1,0 +1,161 @@
+Facebook Existential Consistency FAQ
+ 
+Q: What is local consistency?
+ 
+A: A local consistency model can be checked one object at a time,
+without explicitly considering the relationships between operations on
+different objects. Linearizability is locally checkable because its
+guarantees about wall-clock time allow a checker to easily spot
+situations where a read returns a stale value (i.e. from before the
+real time of the most recent write to the object). Other models weaken
+the real-time constraint with guarantees about honoring program order
+(e.g. if one thread reads y, then writes x, ...), which can't be
+checked by looking at just x and not also y. The paper talks about
+local models because its Principled Consistency Analysis uses a trace
+of operations on just a small subset of the objects, and thus can't
+generally look at the relationships between operations on different
+objects.
+
+Q: Is there a relationship between local/non-local and weak/strong?
+
+A: I suspect that, in general, local models are weaker than non-local
+models. A non-local model has strictly more scope for imposing
+constraints than a local model.
+
+It's not clear whether linearizability really counts as a local model,
+since it uses time to constrain the set of legal scenarios, and time
+is a global phenomenon.
+ 
+Q: What is causal consistency?
+ 
+A: Suppose client C1 reads object o1 and sees value v1, and then
+writes object o2 with value v2. Causal consistency requires that any
+client C2 that reads o2 and sees v2, and then reads o1, must see value
+v1 for o1. Less formally, if a client sees a write, it must also see
+all writes that could have contributed to the written value.
+ 
+The point of causal consistency is (as usual) to try to ensure that
+concurrent programs behave sensibly while not requiring too much
+communication. For example, suppose x and y are shared variables and
+start out with value zero. And we have just three threads:
+ 
+T1:
+  y = 100
+ 
+T2:
+  x = y + 1
+ 
+T3:
+  print x, y
+ 
+Causal consistency allows T3 to print 0, 0; 1, 0; 101, 100; &c. But it
+does not allow T3 to print 101, 0 -- because if T3 sees T2's write, it
+is also required to see all writes that T2 saw (i.e. T1's write).
+
+At a higher level, causal consistency could be used to avoid anomalies
+like a follow-up message appearing before the message it was replying
+to.
+
+Q: What is TAO?
+
+A: TAO is a geographically distributed data store that provides
+efficient access to Facebook's social graph. Have a look at
+https://www.facebook.com/notes/facebook-engineering/tao-the-power-of-the-graph/10151525983993920/
+and
+https://www.usenix.org/conference/atc13/technical-sessions/presentation/bronson
+
+Q: Why does it make sense to merge read nodes into write nodes in the
+linearizability checker in Figure 2 / Section 3.2?
+
+A: Think of the graph as containing only writes, with directed edges
+expressing two kinds of order. There should be an edge from W' to W''
+if W' completes before W'' starts (in wall-clock time). And there
+should be an edge from W' to W'' if a read not concurrent with either
+observed the value written by W'' after W' completed. So in Figure 4 I
+suggest you focus on (c): the W1->W2 edge denotes the fact that W1
+finished before W2 started, and the W2->W1 edge denotes the fact that
+a read observed W1's value after W2 completed. In Figure 5(c), since
+W1 and W2 are concurrent there are only edges of the second kind:
+W1->W2 denotes the fact that R2 saw W2's value after W1 completed, and
+W2->W1 denotes the fact that R1 saw W1's value after W2 completed.
+
+Q: Why do they make an exception for passwords and store them in
+linearizable storage?
+ 
+A: If a user changes their password, it's best if the old password
+instantly stops working. Because the user might have changed the
+password due to worries that someone else might have learned the
+password and be actively using it.
+
+Q: For a system like Facebook's, when would it be useful to have
+strong consistency?
+
+A: One school of thought holds that the design space between eventual
+consistency and full ACID transactions is not very useful, e.g. that
+linearizability and causal consistency aren't worthwhile. But not
+everyone believes that.
+
+There are two benefits to strong consistency: it makes it easier to
+write correct programs, and it can improve the freshness and
+intelligibility of information that human users see.
+
+If software can rely on linearizability, then it can use careful
+ordering of writes to achieve correctness. An example is the PNUTS
+paper's deletion of a user U1 from the ACL and insert of a new photo.
+Under linearizability, waiting for the ACL write to complete before
+issuing the photo insert is sufficient to ensure that U1 can't see the
+new photo. Eventual consistency makes this harder; perhaps one would
+have to put the ACL and photo list in the same record, and update them
+in a single write.
+
+Humans may appreciate strong consistency because it reduces the amount
+of stale or delayed data they see. This can be important if the data
+is stock quotes, or auction bids, or messages from other users. Delays
+or staleness of milliseconds are usually OK, but users may get annoyed
+by seconds or minutes.
+
+Strong consistency can make data presented to humans more intuitive by
+avoiding anomalous orderings. For example, eventual consistency might
+result in a messaging system displaying a follow-up posting before the
+original posting appears, while strong consistency might prevent that.
+
+The down-side of stronger consistency, of course, is that it's
+expensive to provide. Perhaps the easiest way to make the FB system
+linearizable is for each write to not return until after all cached
+copies of the data be to invalidated or updated. This would make
+writes a lot slower.
+
+Q: What larger lessons can we draw from the fact that the paper saw
+only a tiny number of violations of linearizability?
+
+A: It's safe to say that Facebook's users wouldn't have perceived much
+difference if the storage system had provided stronger consistency.
+But it's not clear whether that observation generalizes very far.
+
+It's easy to imagine situations where anomalies would be much more
+common. If there were a few popular records that were frequently read
+and written by many users in all regions, a much higher fraction of
+reads might have returned stale data. The reason is that new values
+and invalidates are propagated in the background (and perhaps slowly)
+to cached copies.
+
+It's also likely that some effort was required by Facebook's
+programmers to write software that behaved well with eventual
+consistency. If the storage system instead guaranteed strong
+consistency, perhaps some of the software would have been easier to
+write. Perhaps weak consistency caused Facebook's programmers to avoid
+using the storage system for some tasks. The paper says this is true
+for passwords.
+
+Q: Why does the paper talk about phi-consistency?
+
+A: phi-consistency doesn't correspond to any other definition of
+consistency. Instead, it checks whether all the caches have the same
+value for a given key. This is loosely related to consistency, since
+if there are no writes going on, the caches should have the same
+value. If there are active writes, phi may be less than 100%, though
+this doesn't necessarily imply that there's been a consistency
+violation. The authors use phi-consistency as a hint that there might
+be storage-system faults -- if the number of keys with different
+values in different caches goes up, something may be broken.
+

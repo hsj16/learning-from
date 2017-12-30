@@ -1,0 +1,173 @@
+PNUTS FAQ
+
+Q: Who uses PNUTS?
+
+A: Yahoo is the only company using PNUTS, as far as I know. Other
+companies struggle with similar issues, but only some of them describe
+their solutions in detail. We will look at Amazon's Dynamo, a
+different design tailored for shopping carts, and at some work from
+Facebook. Google's Spanner is another approach to a similar set of
+problems.
+
+Q: What happens when the master fails?
+
+A: If the record's master region loses connectivity or the region is
+down, then *no* new master is designated. Storage units that have
+writes outstanding for the master must wait until the region is
+available again. If the YMB server at the master fails, there's a
+backup with a copy of the log ready to take over.
+
+Q: What is the YMB?
+
+A: I don't know of a good description of the YMB (Yahoo Message
+Broker), but the API is in the following spirit:
+
+  publish(message)
+  subscribe(handler)
+  handler(message)
+
+A YMB client publishes a message. Other YMB clients subscribe and
+provide handlers that must be called when a message is published. If
+several processes are subscribed, then they all receive messages in
+the same order.
+
+YMB persists messages on disk, replicates them, and ensures that
+messages are delivered in the same order as a local YMB cluster
+received them for a given topic. YMB is reliable -- it keeps trying to
+send each message until the recipient acknowledges.
+
+Perhaps Yahoo's newer Pulsar is similar to YMB:
+
+https://yahooeng.tumblr.com/post/150078336821/open-sourcing-pulsar-pub-sub-messaging-at-scale
+
+Q: How does PNUTS use the YMB?
+
+A: The record master will publish updates to its local YMB cluster.
+YMB will deliver each message the YMB in each other region, and each
+of them will forward each message to a local PNUTS router, which will
+send it to the appropriate SU. Because there is only a single writer
+in PNUTS (i.e., the record master), the updates to a record will all
+be totally ordered. Because YMB doesn't lose messages (it stores them
+on disk, replicated), the messages are always guaranteed to be
+delivered eventually.
+
+Q: What are ordered and hashed tables?
+
+A: Ordered tables keep keys sorted so that range queries are efficient
+(e.g., return all records between key1 and key2). Ordered tables are
+often implemented with trees. Hash tables don't keep keys ordered, but
+instead assign each key to a slot in an array using a hash function on
+a key; they are fast when the application just needs one record
+associated with a particular key. In practice most applications can be
+made happy with these two kinds of tables.
+
+Q: For Example 1, would you have to use Read-critical() instead of
+Read-any() to ensure that you get the latest version of the photo
+permissions? Read-any() could return stale data, so it seems like you
+could get the old permissions when mom wants to view the photos.
+
+A: There is an assumption that the photo list and ACL are in the same
+record. read-any() should work fine because writes to the same record
+are ordered. Thus, if Alice updates the ACL first and then the photo
+list, a reader who observes the new photo list will also have observed
+the new ACL.
+
+Q: Are the contributions mentioned in Section 1.2 really fundamentally
+new and radical?
+
+A: Every research paper must claim contributions to convince the
+reviewers of the conference to which the paper was submitted that the
+paper is original. I think the right way to read this paper is as an
+experience paper in building a system where reads can be served from
+the local data center so that the user observes low delay. This means
+that the designers had to give up some consistency, because checking
+other data centers for the most recent write would be too expensive.
+Yet they don't want to make life of programmers complicated because of
+the lack of consistency. The paper reports how they address these
+goals with mostly well-known techniques, but combined in a way that
+led to a novel system design. The observation that the design worked
+well for some substantial real-world applications is itself a valuable
+contribution.
+
+Q: What is a hosted system?
+
+A: PNUTS operates as a shared infrastructure for many Yahoo!
+applications. Instead of having each Yahoo application deal with the
+problems of several data centers, Yahoo! provides a shared
+infrastructure that many application can use so that
+application-development is simpler. That raises the challenge what
+services the shared infrastructure should provide and how so that it
+works well for many applications. In addition, the Yahoo! team can add
+more more machines dynamically to the shared infrastructure to deal
+with load, and that might benefit several applications.
+
+Q: What is referential integrity?
+
+A: Suppose there's a table with a record per MIT student, keyed by the
+student's MIT ID, and there's another table with the 6.824 grade for
+each student in 6.824, with the student's MIT ID. If there's a record
+in the 6.824 grade table with MIT ID 12345, but there is not entry for
+MIT ID 12345 in the student table, that's a violation of referential
+integrity. That is, a record in one table refers to a record that
+ought to exist in a second table, but doesn't. Many SQL databases
+enforce referential integrity, but PNUTS does not.
+
+Q: What does the paper mean by partial versus total ordering?
+
+A: By "partial", the paper means that writes to different records have
+no ordering relationship -- two writes to different records may be
+executed in either order at different regions. By "total" the paper
+means that two writes to the same record are executed by all regions
+in the same order.
+
+Q: What are secondary indexes and materialized views as described in
+Section 6.1?
+
+A: A secondary index is an index of a table on some column. Often you
+want quick access to a table's records by looking up in one of a
+number of different columns, e.g. I might want to retrieve personnel
+records at MIT by employee name, or MIT ID, or department. For each,
+there might be an index, keyed by name of ID or department, yielding
+for each possible value the set of matching table records. Most
+databases support this kind of index.
+
+A materialized view is a pseudo-table that is maintained as a result of
+updates to ordinary tables. I might have an ordinary table with a record
+for each vote cast in an election, and a materialized view that
+maintains, for each candidate, the current number of votes. Materialized
+views are a feature of some SQL databases.
+
+Q: What challenges does geographic distribution create in a
+distributed system?
+
+A: The killer problem is that the communication time between replicas
+at different sites is long, due to the speed of light. It takes
+perhaps 40 milliseconds to send a message over the Internet from the
+east coast to the west coast. So if you ran a strict replication
+protocol like Raft with replicas on both coasts, it would take at
+least 80 milliseconds to get anything done. Many people consider that
+strict schemes like Raft are impractically slow if the replicas are
+geographically distributed.
+
+In contrast, an efficient Raft on a LAN with all the replicas in the
+same room can probably complete an operation in tens of microseconds,
+1000 times faster.
+
+Q: What do other big web sites use for storage?
+
+A: Lots of web sites use traditional SQL databases like MySQL.
+Facebook uses a combination of MySQL, memcached, and custom code to
+push data updates to different geographically-separated replicas.
+Google uses BigTable and Spanner. Amazon uses Dynamo. Lots of web
+sites use open source databases like Redis, MongoDB, and Cassandra. Of
+these, the ones that support geographical replication (and are thus
+attacking the same problems as PNUTS) are Facebook's setup, Spanner,
+Dynamo, and Cassandra.
+
+Q: Why do companies publish papers about their proprietary software?
+Wouldn't it be better to keep this intellectual property a secret?
+
+A: Publishing interesting high-quality research is a good way to
+attract top-quality engineers. The value of a steady stream of
+excellent new employees is usually far higher than any loss caused by
+publishing.

@@ -1,0 +1,461 @@
+> Is R* still used in its raw form or was it just more inspiration for
+> future systems?
+
+
+R* was an experimental research system; I suspect it was never used
+commercially. However, it and the system it was based on (System R) were
+very influential; many subsequent commercial systems borrowed their
+ideas.
+
+
+> What kind of current day systems use 2PC or presumed-abort/commit
+
+
+Many modern databases support distribution -- sharding the data across
+many servers to achieve parallel speedup and thus be able to support
+high loads. These databases use 2PC to implement transactions that use
+records on multiple shards. If you search the web for "oracle presumed
+abort" or "ibm presumed abort" you'll see hints that their commercial DB
+products use PA.
+
+
+> Given that this paper was published in 1986, the systems in question
+> are rather dated. Are there newer systems that embrace deadlocking
+> databases?
+
+
+Every database system that supports transactions has to cope with
+deaadlocks. The problem and set of possible solution designs hasn't
+really changed since R*. If you poke around the web you'll find plenty
+of material about deadlocks in modern databases such as IBM DB2.
+
+
+> My question is more of a meta question. I'm wondering why we seem to
+> have gone back in time to study this older system? It seems like we've
+> been on a trend to understand more and more recent things.
+
+
+There are ideas that are important today that were invented a long time
+ago. Two-phase commit was invented at least 30 years ago, but is still
+important in today's distributed systems.
+
+Usually the reason we assign an old paper is that we want to talk about
+an important idea that's old, and there are no new papers that do a good
+job of describing the idea. Usually new papers assume the reader already
+understands old ideas.
+
+
+> Could it be that it is interesting to see an early version of a
+> distributed transactional system?
+
+
+I find it interesting to read old papers on topics like this, though
+they can be confusing when the authors have unstated assumptions that
+are hard to reconstruct decades later.
+
+
+> Why is it so important for the transactions to be atomic?
+
+
+What "transaction" means is that the steps inside the transaction occur
+atomically with respect to failures and other transactions. Atomic here
+means "all or none". Transactions are a feature provided by some storage
+systems that makes programming easier. An example of the kind of
+situation where transactions are helpful is bank transfers. If the bank
+wants to transfer $100 from Alice's account to Bob's account, it would
+be very awkward if a crash midway through this left Alice debited by
+$100 but Bob *not* credited by $100. So (if your storage system supports
+transactions) the programmer can write something like
+
+BEGIN TRANSACTION
+  decrease Alice's balance by 100;
+  increase Bob's balance by 100;
+END TRANSACTION
+
+and the transaction system will make sure the transaction is atomic;
+either both happen, or neither, even if there's a crash.
+
+
+> What is the advantage of this kind of consensus algorithm over one
+> that uses majority agreement?
+
+
+Distributed atomic commit causes different computers to do *different*
+things (e.g. Alice's bank debits Alice, Bob's bank credits Bob), and we
+want them *all* to do their thing, or none of them. Atomic commit
+systems are typically not available in the face of failures, since they
+require all participating computers to perform their part of the
+transaction.
+
+Consensus (e.g. Raft) causes a set of computers (replicas) to all do the
+*same* thing (so they remain replicas). Further, we're willing to settle
+for only a majority, because we want the system to be available in the
+face of failures.
+
+You should view two-phase-commit and Raft as solving different problems.
+
+
+> How many subordinates should such a system use to be both reliable and
+> effective?
+
+
+The number of subordinates is determined by how the database's data is
+divided among servers, and by how many data records a given transaction
+uses.
+
+If the load is very high, or the amount of data is very large, then the
+database will need to be sharded among many servers that can execute in
+parallel. A very big database might shard its data over dozens or
+hundreds of servers.
+
+The number of subordinates a given transaction involves is set by the
+number of shards from which the transaction uses records. If a
+transaction only looks at two database records, then at most the
+transaction will use two subordinates. If a transaction uses thousands
+of database records, it could involve all the servers as subordinates.
+
+The point of using multiple servers here is not to increase
+availability. It is to achieve higher throughput via parallel execution.
+
+
+> The paper repeatedly refers to "forgetting" committed and aborted
+> messages. It always uses the term in quotes, and I'm not entirely sure
+> what it means by that. Does it just mean removing any pending-status
+> the transaction had (which would matter during recoveries)?
+>
+> In context: "force-writes a commit record, sends an acknowledgment
+> (ACK) message to the coordinator, and then commits the transaction and
+> 'forgets' it."
+
+
+The paper uses "forget" to mean deleting all record of the transaction
+(though any writes to the DB the transaction performed remain). So if
+the TC has forgotten about a transaction, and a subordinate asks about
+the transaction, the TC won't have any record of the transaction; much
+of the paper is about how to proceed correctly in such situations.
+Forgetting is important because otherwise the TC and subordinates would
+have to remember every transaction, which would be awkward after years
+of operation and millions of transactions.
+
+
+> My Question: Where does the recovery process live? Is there one per
+> server? If not, how are messages sent to this recovery process?
+
+
+Each server has a separate recovery process.
+
+
+> For the 2PC, are the recovery process always on (the virtual storage
+> always being kept updated with stable storage)? If it only starts
+> reading logs at the time of failure, is it efficient?
+
+
+A server's recovery process only runs if something goes wrong (a timeout
+or crash+reboot). Recovery can be slow, since it may need to read state
+from the disk log, or send queries to other servers. But the hope is
+that recovery only needs to be run rarely.
+
+
+> Another quesiton: How would some servers say the transaction is
+> read-only and others not?
+
+
+Each subordinate performs a different part of the transaction; some
+parts may involve just reads, others may involve writes too. For
+example, the transaction may look like this:
+
+BEGIN TRANSACTION
+  if 6.824 has fewer students than 6.830:
+    enroll student in 6.824
+  else:
+    enroll student in 6.830
+END TRANSACTION
+
+Suppose the 6.824 information is stored on one server, and the 6.830
+information on another. If the "if" is true, then the transaction reads
+the 6.830 information but doesn't write it. Thus the part of the
+transaction done at 6.830's server is read-only. But the part done on
+6.824's server is read/write.
+
+
+> What sort of systems use the hierarchical 2 phase commit described in
+> the paper?
+
+
+I suspect the reason is to cope with SQL statements (or query plans)
+that involve sub-queries. For example, suppose table ttt is sharded
+across many servers. If the program says
+
+  BEGIN TRANSACTION
+    UPDATE ttt SET x = (SELECT ...)
+  END TRANSACTION
+
+Then each server's share of the work requires it to run inner SELECTs to
+calculate the new column x value for each row. Those SELECTs may need to
+be sent to other servers, and those other servers will need to acquire
+locks, contribute yes or no when the TC decides whether to commit, and
+release locks after the final COMMIT or ABORT. The natural
+implementation of this is a hierarchy.
+
+A JOIN of two tables can also require each server to gather data from
+other servers, and thus might be a natural fit for hierarchical
+transactions.
+
+
+> Q: Why would a subordinate send a NO VOTE to the coordinator on a
+> regular run?
+
+This is a good question! The reason we care most about is if the
+subordinate crashed and rebooted after it did some of its work for the
+transaction but before it received the prepare message; during the crash
+it will have lost the record of tentative updates it made and locks it
+acquired, so it cannot complete the transaction, and must vote NO.
+Another possibility (depending on how the DB works) is if the
+subordinate detected a violated constraint on the data (e.g. the
+transaction tried to write a record with a duplicate key in a table that
+requires unique keys). Another possibility is that the subordinate is
+involved in a deadlock, and must abort to break the deadlock.
+
+One way to make atomic commit faster is to restrict transactions so that
+subordinates cannot say NO in some or all situations. The read-only
+transactions in the paper's Section 3 are like this. This paper
+identifies more such streamlined situations:
+
+https://www.usenix.org/system/files/conference/atc12/atc12-final118.pdf
+
+
+> Are there any cases where you wouldn't want to use presumed abort over
+> the initially proposed protocol?
+
+
+I think Presumed Abort only differs from 2P when the transaction is
+partially or wholly read-only, and in that case PA seems strictly more
+efficient. So I don't think there's any situation where you'd prefer 2P
+to PA.
+
+
+> Who exactly plays the role of coordinator in the distributed
+> transactions? The client, a third party "arbiter", or someone else? Is
+> this possible to instead having an arbiter to issue the commit
+> requests and respond to the client?
+
+
+There are two common arrangments. One possibility is that a server acts
+as the TC (transaction coordinator); it's particularly convenient for
+one of the servers participating in the transaction to also act as TC,
+since that saves a few messages. Another common setup is for the client
+to also act as TC, again saving a few messages, though it may be tricky
+to ensure that a client acting as TC has the required crash recovery
+properties.
+
+
+> In section 2.2, the paper discusses subordinate failure and recovery
+> process, but not for the coordinator.
+
+
+Section 2.2's "recovery process" runs on both the TC and on the
+subordinates. For example, the text in 2.2 "If the recovery process
+finds a transaction in the committing state...", that applies to the TC
+(if the TC got YES votes from all subordinates, logged a commit record,
+and then crashed).
+
+The paper's text is confusing because it's written in a way general
+enough to apply to a hierarchy of servers (root TC, non-leaf
+subordinates that partially act as TC, and leaf subordinates).
+
+
+> Moreover, it doesn't discuss what happens when a subordinate is trying
+> to contact a coordinator during recovery and the coordinator fails.
+
+
+If the subordinate needs to contact the TC, the subordinate must keep
+trying until the TC answers.
+
+
+> How come the recovery process cannot distinguish the role (coordinator
+> versus subordinate) based on the inquiry?
+
+
+I think the situation the paper has in mind is that a server has
+altogether forgotten about the transaction. In a hierarchical
+transaction scheme, servers in the middle of the hierarchy act as both
+coordinators (for their subordinates) and subordinates (to the
+coordinator above them). So it may not be clear in which capacity the
+forgetful server is being queried.
+
+
+> How can a coordinator, upon restart, abort a transaction and not
+> inform any of the subordinates (Section 2.2, last paragraph)?
+
+
+I think the paper means "the TC forgets about the transaction during the
+crash, because it loses the contents of RAM." The TC doesn't do anything
+active to abort the transaction (since it no longer even knows the
+transaction existed), but will reply ABORT to any query about the
+transaction.
+
+
+
+> I couldn't find any mention about what happens if ACK messages are
+> lost in transit between subordinate and coordinator. Does the
+> subordinate retry at some point? Does the coordinator retry sending to
+> the subordinate at some point?
+
+
+I believe the TC re-sends the COMMIT message until the subordinate
+answers. The TC needs to be sure the subordinate has heard (and logged)
+the COMMIT before the TC can forget about the transaction.
+
+
+> The two-phase commit paper does not mention replicating data on
+> individual subordinates, so that a subordinate's failure can be
+> withstood by the distributed database system without it voting NO for
+> every transaction. How would 2PC work on top of a system of
+> subordinates running Raft/Paxos, to increase the stability of
+> subordinates in the 2PC protocol?
+
+
+You are right that 2PC doesn't provide availability, since there are
+situations where it must block waiting for a crashed server to reboot.
+If you want to continue despite any single failure you must layer 2PC on
+top of a replication scheme like Raft or Paxos, so that the TC and each
+subordinate is replicated. The TC and subordinate must be implemented in
+a way that's compatible with Raft/Paxos, which is easy in principle but
+(as you'll see in Lab 3) requires following some rules. You'll get a
+little experience with this in Lab 4, where there's a specialized
+two-phase-commit-like protocol involved in moving a shard of key/value
+pairs from one replication group to another.
+
+
+> In the discussion of the deadlock detector, the authors state that
+> because they do not expect deadlocks to occur frequently, they treat
+> every detected deadlock as a true deadlock. Is this a fair assumption
+> (in reality how frequently do deadlocks occur) and are there any
+> potential dangers to a false positive detected deadlock?
+
+
+My experience is that deadlocks are rare. Further, I suspect that if
+someone has a workload in which they are frequent, they will probably
+re-write their transactions to have fewer deadlocks (perhaps by
+acquiring locks in the same order in every transaction). The danger of
+false positives is that transactions will be needlessly aborted and have
+to be re-executed, which wastes time.
+
+
+> Also, the paper mentions "victim transaction abort." If deadlocks
+> don't occur infrequently, isn't this a big hit to reliability?
+
+
+Typically the client software re-executes the transaction if it's
+aborted.
+
+
+> Consider the modified example in the lecture notes:
+>
+>   x and y are bank balances
+>   x and y start out as $10
+>   T1 is doing a transfer of $1 from x to y
+>   T1:
+>     add(x, 1)  -- server A
+>     add(y, -1) -- server B
+>   T2:
+>     tmp2 = get(y)
+>     tmp1 = get(x)
+>     print tmp1, tmp2
+>
+> The modified part is that the first two instructions in T2 were
+> swapped. Is it possible that during the first 2-phase commit, T1
+> aquired the lock of x and T2 aquired the lock of y, and during the
+> second 2-phase commit, T1 aquired the lock of y and T2 aquired the
+> lock of x, and eventually T2 outputs 11, 10?
+
+
+This example will deadlock. Since locks x and y are already held, T1 and
+T2 will both wait forever on their second lines. In R*, eventually the
+deadlock detector will abort one or the other.
+
+
+> What will happen if a subordinate sends an ACK before writing the
+> COMMIT record?
+
+
+This can't happen because R* writes the COMMIT record before sending the
+ACK.
+
+Suppose it could happen, and the subordinate crashed after sending the
+ACK and before writing the COMMIT. The TC would receive the ACK and
+forget about the transaction. On restart, the subordinate would see the
+PREPARE record in its log but not a COMMIT record, and it would ask the
+TC whether the transaction committed or not. By the paper's rules for
+2P, the TC would reply ABORT because the TC has no record of the
+transaction. This is a serious error because the transaction actually
+committed.
+
+
+> How do the actual DB modifications/reads actually fit into this?
+> Basically, I'm wondering which fo the following two subordinates are
+> doing: 1) within the PREPARE force written to the log, they write a
+> number of REDO log operations, describing the ops the transaction
+> should take, then, upon receiving the COMMIT signal, they apply those
+> operations, and force write the COMMIT operation with a variety of
+> UNDO log operations (or, perhaps no new undo/redo log entries) and ACK
+> 2) prior to force writing the PREPARE to the log, they apply the
+> operations in the transactions, then force-write a PREPARE with UNDO
+> log entries, then send the YES back to the coordinator. Upon receiving
+> a commit entry, they write the COMMIT operation as above.
+> Or perhaps they are doing something else? I am rather confused
+> regarding a number of their implementation details.
+
+
+A subordinate applies the updates to the DB after it writes the
+COMMIT to its log.
+
+
+> What happens if the subordinate writes a COMMIT, then crashes before
+> sending the acknowledgement ACK? What prevents the coordinator from
+> having to wait forever for the acknowledgement?
+
+
+The TC will keep re-sending the COMMIT until the subordinate reboots and
+responds with an ACK. If the subordinate never reboots, the TC must
+wait forever.
+
+The goal of two-phase commit is not to ensure continuous availability
+even if some servers are down; instead, it assumes all servers will
+eventually be live, and ensures that (once they are alive) they all
+arrive at the same commit vs abort decision.
+
+If you want both high availability and atomic commit, you can layer
+two-phase commit on top of Raft-replicated services (i.e. use Raft to
+replicate the TC and each subordinate).
+
+
+> They seem to treat force-writes as atomic but what happens if there is
+> a crash during the force-write? Why can they make the assumption that
+> these operations are atomic?
+
+
+A disk write may not be atomic, for example if you kick a mechanical
+drive while it is writing. Then the sector being written may end up with
+a mix of old and new data. The disk will detect this problem if it reads
+the sector, since the per-sector checksum will fail.
+
+Two-phase commit software can cope with failed disk writes by checking
+that the write completed correctly (either the disk tells it, or the
+software reads the data back from the disk). If the write completed, the
+subordinate can respond to the PREPARE or COMMIT message. If the write
+didn't complete, the software should re-try the write.
+
+
+> What happens during the time of coordinator failure? Would the system
+> become unavailable?
+
+
+Yes: there are points in the protocol where if a TC or subordinate
+fails, the other servers must wait (perhaps for a long time) for the
+failed server to reboot.
+
+
+> What hardware is R* implemented on for the purposes of this paper?
+
+I don't know! Probably IBM mainframe hardware from the 1980s.

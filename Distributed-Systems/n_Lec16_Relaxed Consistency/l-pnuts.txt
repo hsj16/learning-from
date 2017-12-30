@@ -1,0 +1,298 @@
+6.824 2017 Lecture 16: PNUTS
+
+Cooper et al, PNUTS: Yahoo!'s Hosted Data Serving Platform. VLDB 2008.
+
+why this paper?
+  introduction to "geographic replication"
+  a real-world case study of relaxed consistency
+
+the setting
+  web sites with data centers ("regions") all over the world
+    users see better performance by contacting nearest region
+  each region stores a replica of all data
+    user profile, messages, shopping cart, friend list, &c
+    potential for web servers to read/write local copy quickly
+    better fault tolerance for e.g. whole-datacenter power failure
+
+the big truth
+  long-distance communication is slow
+    coast-to-coast round-trip Internet is > 50ms
+    30ms of that is speed-of-light
+  hard to make both reads and writes fast if you want consistency
+  we can make either reads or writes fast
+    maintain many replicas
+    either read or write the nearest replica
+  but we can't make both reads and writes fast
+    if we read only the nearest replica, writes must write all replicas
+    if we write only the nearest, reads must read all
+  either read or write must be slow
+    or we must sacrifice consistency
+  PNUTS (and many others) struggle with this truth
+
+PNUTS design overview
+  [diagram: 3 regions, browsers, web apps, routers, SUs, MBs]
+  each region has a complete copy of all data
+  each table partitioned by key over storage units
+    routers know the partition plan
+
+why replicas of *all* data in all regions?
+  so any user can read anything quickly
+    good for data used by many users / many regions
+    cross-region reads would be slow (~100ms)
+  so failed SU can be repaired from a different region's copy
+
+drawbacks of a copy at each region?
+  updates need to be sent to every region
+  local reads may be stale
+  concurrent updates of same data need to be sorted out
+    keep replicas identical
+    don't lose updates (e.g. read-modify-write for counter)
+  uses more disk space
+
+how do updates work?
+  app server gets web request, needs to write data in PNUTS
+  need to update every region!
+  why not just have app logic send update to every region?
+    what if app crashes after updating only some regions?
+    what if concurrent updates to same record?
+
+PNUTS has a "record master" for each record
+  the master is a region
+  all web apps send updates for a record through record's master MB
+  master MB chooses the order to send out writes to all regions
+
+why per-record master?
+  (why not e.g. same master for all data?)
+  a record is often mostly read/written by a single user
+  PNUTS tries to make record's master a region close to the user
+  thus fast writes
+  each record has a hidden column indicating region of record master
+
+the complete update story
+  (many guesses, paper doesn't explain)
+  app wants to update a record, knows key
+  1. app sends update to local router
+  2. router forwards to local SU for key
+  3. SU looks up record master for key: region R2
+  4. SU sends update request to R2's MB
+  5. R2's MB stores on disk + backup MB
+  6. MB sends update to MB at every region
+  7. every region (incl R2) updates local copy (MB -> router -> SU)
+  8. SU in R2 replies to the app with the new version #
+
+step 5 is the commit point
+  and it's the master MB that chooses the order of writes to a record
+
+why does the SU in R2 reply to the app?
+  why not have write() return as soon as committed to master MB?
+  * ensures that read-latest sees any completed write
+  * SU returns new version number, needed for subsequent read-critical
+  * SU returns test-and-set-write success/failure
+
+MB is a neat idea
+  atomic: updates all replicas, or none
+    rather than app server updating replicas (crash...)
+  reliable: logs to disk, keeps sending msgs, to cope with various failures
+  ordered: record's replicas eventually identical even w/ multiple writers
+  async: writes needn't wait for all regions, just master MB
+
+write order semantics
+  suppose each record in a table looks like:
+    Name   Where  What
+    Alice  home   sleeping
+  PNUTS preserves order of writes to each record individually
+    e.g. Alice does
+      write(Alice.What, awake)
+      write(Alice.Where, work)
+    write RPC only returns after committed to record master's MB
+    readers may see home/sleeping or home/awake or work/awake
+    no-one will see work / sleeping
+    all replicas (regions) apply the writes in the same order
+    "timeline consistency"
+  BUT writes to different records do not maintain order
+    e.g.
+      Write(Bob.What, on duty)
+      Write(Alice.What, off duty)
+    readers may these in either order
+      i.e. no-one on duty; or two people on duty
+    if atomic hand-off important, need a single record with name of person
+
+writes are complex, take a while to finish, why OK?
+  fundamental benefit: reads are then very fast, since local
+    and reads usually greatly outnumber writes
+  PNUTS mitigates write delay:
+    application waits for MB commit but not propagation ("asynchronous")
+    master likely to be local (they claim 80% of the time)
+      so MB commit will often be quick
+  still, eval says write takes 300ms if master is remote!
+  down side: readers at non-master regions may see stale data
+
+how stale might a non-master record be?
+  depends on how quickly MB sends updates to regions
+  guess: less than a second usually
+    longer if network slow/flaky, or MB busy
+
+how do apps cope with potentially stale local replica?
+  sometimes stale is ok: looking at other people's profiles
+  sometimes stale is not ok: shopping cart after add/delete item
+  application gets to choose how consistent (section 2.2)
+  read-any(k)
+    read from local SU
+    fast but maybe stale
+  read-critical(k, required_version)
+    fast local read if local SU has vers >= required_version
+    otherwise slow read from master SU
+    why: app knows it just wrote, wants value to reflect write
+  read-latest(k)
+    guaranteed to see any completed write
+      thus per-record strong consistency
+    reads from master SU
+      and depends on write not returning until master SU is updated
+    slow if master is remote!
+
+what if app needs to increment a counter stored in a record?
+  is read-latest(k), increment, then write(k) enough?
+  not if there might be concurrent updates!
+
+test-and-set-write(version#, new value) gives you atomic update to one record
+  SUs reject the write if current version # != version#
+  so if concurrent updates, one will lose and retry 
+  while(1):
+    (x, ver) = read-latest(k)
+    if(t-a-s-w(k, ver, x+1))
+      break
+  t-a-s-w is fully general for single-record atomic read-modify-write
+
+why not atomic multi-record writes?
+  e.g. for bank transfers: Alice -= $10 ; Bob += $10
+  would that be easy to add to PNUTS?
+  no: seems to require single master, not master per record
+
+The Question
+  what's the potential problem in Example 1?
+    Alice's profile record contains both ACL and picture list
+    1. Alice removes her mom from ACL 
+    2. Alice adds a picture to list
+    mere eventual consistency might perform second write first
+    Mom could then (briefly) see the picture
+  how does PNUTS solve this problem?
+    timeline consistency
+    PNUTS guarantees all replicas perform the two writes in issue order
+  PNUTS solution requires that both items be in the same record
+    if ACL and list were in different records, timeline consistency doesn't help
+  PNUTS solution requires mom read Alice's record just once
+    not one read of ACL, a later read of picture list
+
+how to change record's master (if no failures)?
+  e.g. I move from Boston to LA
+  perhaps just update the record, via old master?
+    since ID of master region is stored in the record
+  old master announces change over MB
+  a few clients might try to send writes to the old master SU
+    it will reject them, app retries and finds new master
+
+what about tolerating failures?
+
+app server crashes midway through a set of updates
+  not a transaction, so the completed writes will happen
+  but master SU/MB either did or didn't get each write
+    so each write happens at all regions, or none
+  apps may need to be careful about order of writes
+
+SU down briefly, or network temporarily broken/lossy
+  MB keeps trying until SU acks
+  SU shouldn't ACK until safely on disk
+  So after SU reboots, MB will cause it to catch up
+  SU must ignore duplicate writes from MB
+
+SU never restarts, perhaps due to disk failure
+  spread its tablets over other SUs
+  need to fetch tablet content from SUs at other regions
+    1. subscribe to MB feed, and save writes
+    2. copy tablet from SU at another region
+    3. replay saved MB writes
+  puzzle: 
+    how to ensure we didn't miss any MB updates for this SU?
+      e.g. subscribe to MB at time=100, but source SU only saw through 90?
+    checkpoint messages in 3.2.2 must fix this; not clear how
+
+MB crashes after accepting update
+  logs to disks on two MB servers before ACKing
+  MB recovery looks at log, (re)sends logged but un-acked msgs
+
+record's master region loses network connection
+  can we change record's master to another region?
+    no: original master MB may have logged and ACKed updates, not yet sent out
+  so apps have to wait for region to revive in order to write
+    this is one price of ordered updates
+
+now performance
+
+evaluation focuses on latency, not throughput
+  why latency?
+  why not throughput?
+  maybe throughput can be indefinitely increased by adding more SUs
+  whereas latency is harder to reduce
+
+big performance question: why isn't the MB a terrible bottleneck?
+  all writes funnel through a few MBs
+  which log every write to disk -- 10ms per disk write
+  paper doesn't say how PNUTS avoids MB bottleneck
+  perhaps by batching many writes into each disk log write
+
+5.2: time for an insert while busy
+  probably measuring time until client sees reply via master MB and SU
+  depends on how far away master region is
+  master local: 75.6 ms
+  master nearby: 131.5 ms
+  master other coast: 315.5 ms
+
+Why 75 ms for write to locally mastered record?
+  speed-of-light delay?
+    no: local
+  queuing, waiting for other client's operations?
+    no: they imply 100 clients was max that didn't cause delay to rise
+  End of 5.2 suggests 40 ms of 75 ms in in SU
+    how could it take 40 ms?
+      each key/value is one file?
+      creating a file takes 3 disk writes (directory, inode, content)?
+    what's the other 35 ms?
+      MB disk write?
+
+5.3 / Figure 3: effect of increasing request rate
+  what do we expect for graph w/ x-axis req rate, y-axis latency?
+    for lower rates, constant latency
+    but system has some max capacity, due to disk seeks or CPU
+    for higher rates, queue grows rapidly, avg latency blows up
+  blow-up should be near max capacity of h/w
+  we don't see a blow-up in Figure 3
+    end of 5.3 says clients too slow
+  text says max rate was about 3000/second
+    10% writes, so 300 writes/second
+    5 SU per region, so 60 writes/SU/second
+    about right if each write does a random disk I/O
+    but you'll need lots of SUs for millions of active users
+
+stepping back, what were PNUTS' key design decisions?
+  1. replication of all data at multiple regions
+     fast reads, slow but async writes
+  2. relaxed consistency -- stale reads
+     needed if you want fast reads and async writes
+  3. sequence all writes thru record master
+     good for consistency; bad for latency; maybe bad for fault tolerance
+  4. ordered writes only for individual records
+     simplifies system; maybe awkward for applications
+
+Points where the paper isn't clear
+  What's the sequence of messages during a write?
+  How/where is each record's version # maintained?
+  The two-part version # implies it's remembered after delete -- where?
+  How are a delete and subsequent insert of same key ordered?
+  Paper says write() returns new version # -- how does it find out?
+  How does client learn fate of test-and-set-write?
+  What chooses write order -- master SU, or master MB?
+  How do writes and failure interact with changing a record's master?
+
+Next: 
+  measurements of eventual consistency at Facebook
+  then Amazon's Dynamo, a real-world DB with even looser consistency

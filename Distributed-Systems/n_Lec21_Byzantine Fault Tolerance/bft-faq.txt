@@ -1,0 +1,179 @@
+Q: Do any systems use a BFT protocol today?
+
+A: BFT is seeing a come back for bitcoin-like systems. Bitcoin solves consensus
+with malicious participants, but using proof-of-work and long delays to resolve
+forks. The Stellar consensus protocol generalizes PBFT for federated
+deployments.  IBM's Hyperledger uses PBFT as its consensus module.
+
+Q: Would it be practical to use BFT to implement a "permissioned" bitcoin where
+the membership set is fixed? How fast and realistic (in the real world) would
+such a system be?
+
+A: There is an interesting connection to Bitcoin-like systems.  Bitcoin solves a
+consensus problem with malicious nodes, but it can have long forks.  Checkout
+Stellar and Hyperledger for ledger systems based or inspired by PBFT.
+
+Q: Is primary-backup or Raft the only kind of system where we need to handle
+Byzantine faults? Are there other systems?
+
+A: Any computer that is compromised can become byzantine because its under the control of the attacker. 
+
+Q: How does Google or other companies handle Byzatine failures in their systems?
+
+A: I don't know what Google does, but my guess is that they focus on preventing
+and detecting compromised nodes instead of running their systems with some
+BFT-like protocol that can handle compromised nodes.
+
+Q:  Is byzantine fault tolerance a strictly harder problem than solving network
+partitions?
+
+A: The paper tackles the same problem as Raft (including handling network
+partitions), but in the presence of malicious replicas.  So, the PBFT paper
+solves a more challenging problem than Raft.
+
+Q: How does replicas deal with lost messages or messages out of order?
+
+A: The messages contain enough information for recipients to discover that they
+missed a message or that a message is out of order.  See 4th paragraph of Sec
+6.1 for the details.
+
+Q: In term of leadership in BFT, does BFT follow a strong leader principle? Has
+there designs on weaker form of leader to allow for more availability?
+
+A: BFT, like Raft, has a designated leader for a view, which determines the
+order of messages.  If the leader fails or doesn't follow the protocol, there is
+a view change, which comes along with a new leader.
+
+There are many papers following on the practical BFT paper.  The
+high-performance ones I know about have a designated leader; for example, see
+the following paper:
+https://www.cs.utexas.edu/~lorenzo/papers/kotla07Zyzzyva.pdf
+
+Q: The number of messages proposed by paper seems to be O(n^2) where n is the
+number of replicas. Is there any literature that establishes that you need
+O(n^2) messages to handle byzantine failures?
+
+A: There is a large literature on BFT protocols. One of the most efficient ones
+I know about is Zyzzyva
+(https://www.cs.utexas.edu/~lorenzo/papers/kotla07Zyzzyva.pdf), which speculates
+that every node is honest and sends in that case 2n messages (see Fig. 1).
+
+The number of messages is only one factor in BFT protocols, however. And is
+often not the most important one because in many protocols messages are sent in
+parallel or use multicast as BFT does.  Other metrics are the number of servers
+on the critical path for latency, the number of messages per second (which can
+be increased by batching, and thus sacrificing latency), and so on.
+
+
+Q: How does PBFT do key management for MACs?
+
+A: Each client shares a secret session key with each replica.  Then, there is
+some additional protocol machinery to allow replicas to verify the authenticity
+of 2f+1 responses from other replicas, which takes advantage of the presence of
+a primary.  The full details are in the doctoral thesis:
+https://dspace.mit.edu/bitstream/handle/1721.1/86581/48116479-MIT.pdf
+
+
+Q: Do sequence numbers never skip, no matter what?
+
+A: I believe that is true, although during a view change some sequence numbers
+will become a no-op.
+
+Q: How can a given request be committed in two different views, but with the
+same sequence number? What sequence of events can cause this?
+
+A: What can happen is that the new primary may not know about a message that was
+committed in the previous view (because it missed it).  But, the
+normal-operation protocol will guarantee that the primary will learn about that
+message during the view change protocol, because 2f+1 good replicas have
+committed to the message in the previous view.  The new primary then starts from
+the last stable checkpoint and fixes up the log, inserting proofs of stability
+for messages.  Then, it changes to a new view.
+
+Q: Is it possible for a non-primary replica to receive (and accept) a prepare
+message *before* it receives the corresponding pre-prepare message from the
+primary? Why is this okay?
+
+A: A replica can learn about 2f+1 prepares before it has seen the pre-prepare
+from the primary (because of out of order delivery or lost messages), but it
+will notice that it hasn't seen a pre-prepare for that sequence number yet.  I
+don't know what the protocol exactly does in that case, but most likely it waits
+for the pre-prepare, because that contains the log entry itself. The prepares
+contain only digests of the entry.
+
+Q: From the bottom of page 2, why does a system have to rely on synchrony to provide liveness in cases when it does not rely on synchrony to provide safety?
+
+A: There is an impossibility results that in an asynchronous distributed system
+(where messages to don't have a bounded delay) with one faulty node, one cannot
+achieve consensus in a bounded amount of time.  This is called the FLP result
+(there is a discussion of FLP here:
+http://the-paper-trail.org/blog/a-brief-tour-of-flp-impossibility/ or on
+wikipedia).
+
+The PBFT authors are just pointing out they aren't circumventing this result,
+and instead that they are assuming a weak form of synchrony (i.e., delay(t)
+doesn't grow faster than t indefinitely).
+
+Q: Also, why does PBFT require at most 1/3 faulty machines and why couldn't they relax this constraint to 1/2?
+
+A: The short answer is that the protocol doesn't work if more than 1/3 of the
+nodes is malicious.  They have a short proof that 3f+1 is the minimum number of
+replicas necessary (see p3, second paragraph).
+
+Q: The paper mentions deterministic state machine changes in order to prevent
+divergence. They mention that replicas must be able to decide deterministically
+whether a value is correct and what to do if it is not. How do replicas achieve
+this? I understand the next paragraph regarding the replicas' participation in
+choosing the correct value as a special case, but in the general case, how does
+a replica know if a value is correct or not?
+
+A: The general case requires an additional phase in the protocol, which asks for
+2f+1 values and then using a deterministic computation to compute the value to
+use (e.g., median of the 2f+1 values).  The authors point that this extra phase
+can be avoided in the common case, because replicas can check if the value is
+correct. For example, in case of a time stamp, the primary can choose it and the
+replicas can validate that the time stamp is close enough, by comparing the time
+stamp supplied by the primary is within a window from their local clock.
+
+
+Q: Are view changes analagous to elections in Raft? I don't quite understand
+though how a server "wins" the view and becomes the primary?
+
+A: View changes are like changing leaders in Raft, but there is no election.
+The primary in the next is pre-determined, it is v mod n (where v is the view
+number and n the number of replicas).  So the primary rotates among servers and
+there are at most f faulty primaries in a row (since no more than f nodes can be
+faulty).
+
+Q: How would a system decide on a value for f? How do you predict how many
+servers you expect to fail in a malicious attack?
+
+A: This is the Achilles heel of PBFT as described.  In later work, the authors
+extended the PBFT to include proactive recovery so that the algorithm can
+tolerate any number of faults over the lifetime of the system provided fewer
+than 1/3 of the replicas become faulty within a small window of vulnerability
+(see http://dl.acm.org/citation.cfm?id=571640).
+
+Q: In the Introduction, the authors go out of their way to talk about how their
+algorithm is _practical_, but then state later that their only restriction is
+that each node in their network should run a different implementation of the
+service code (in order to fail independently). How realistic is this?
+
+A: This is indeed a tricky issue: the different replicas cannot have the same bugs, and thus the implementation must be different. The paper mentions N-version programming, but in later work the authors extended PBFT with BASE, a replication technique,  which uses abstraction to improve its ability to mask software errors and reuse of off-the-shelf service implementations. It repairs each replica periodically using an abstract view of the state stored by correct replicas, and each replica can run distinct or nondeterministic service implementations, which reduces the probability of common mode failures (see http://dl.acm.org/citation.cfm?id=859718 for the details).
+
+Q: What is a digest?
+
+A: A message digest refers to the result of computing collision-resistant
+cryptographic hash function, such as SHA256, over the message.
+
+Q: I recently read "The Saddest Moment"
+(https://www.usenix.org/system/files/login-logout_1305_mickens.pdf), and wonder
+what the practical applications of BFT would be? It seems that either the
+environment is controlled and BFT is unnecessary, or the environment is
+uncontrolled and BFT is intractable.
+
+A: I don't know what they are, but we are reading the paper 1) because it is an
+impressive result; and 2) it is likely that it might come back.  For example,
+Bitcoin solves a similar problem as BFT but has long forks; perhaps in the
+future we will systems that combine BFT and Bitcoin ideas.
+

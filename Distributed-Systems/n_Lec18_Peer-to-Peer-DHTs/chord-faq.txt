@@ -1,0 +1,79 @@
+Chord paper FAQ
+
+Q: Is hashing across machines a good way to get load balanced
+sharding? Why not explicitly divide up the key space so it's evenly
+split?
+
+A: If you could have a centralized server that assigns keys to shards
+then an exact division is a great plan. Many systems do just that
+(e.g., GFS or the shard master in lab 4). If you cannot have a central
+server, then you need another plan for load balancing, and consistent
+hashing is such a plan.
+
+Q: Does BitTorrent use Chord?
+
+A: The Bittorrent P2P Tracker uses Kademlia. Kademlia and Chord are
+similar. Bittorrent itself doesn't use Chord or Kademlia.
+
+Q: If you want to add fault-tolerance to a Chord-based system should
+you replicate each Chord node using Raft?
+
+A: Typical Chord-based applications don't need strong consistency, and
+have weak durability requirements (e.g., often the client must refresh
+the data periodically to ensure it isn't lost). So Raft seems too
+heavy-weight. I know of only one design (Scatter) that combines Chord
+and Paxos, where segments of the ring form a Paxos group to get
+stronger guarantees. Google "Scatter SOSP" if you are curious.
+
+Q: What if Chord DHT nodes are malicious?
+
+A: Chord (and most peer-to-peer systems) cannot handle malicious
+participants. An open Chord system is vulnerable to a Sybil attack: in an open
+Chord system, an attacker can become a participant and create many chord nodes
+under the attacker's control, and take over the whole system.  There are DHTs
+that try to handle such attacks but it is challenging in a peer-to-peer setting
+(e.g.,see http://pdos.csail.mit.edu/papers/whanau-nsdi10.pdf).
+
+Chord and application on top of it provide some security measures, however.  For
+example, node IDs are typically the SHA-1 of the IP address of a node, so that
+attacker must have control of the IP address being used.  Application typically
+advertise data in Chord under the key that corresponds to the SHA-1 of the data;
+so when when application retrieves the data, it can check that is the right
+data.
+
+Q: Is Chord used anywhere in practice?
+
+A: We don't know. Clearly Kademlia and Amazon's Dynamo are strongly influenced by
+Chord. Rumor has it that Cisco uses Chord in some of its products.
+
+Q: Could the performance be improved if the nodes knew more about
+network locality?
+
+A: Yes. The total latency for a lookup can be improved using proximity
+routing (e.g., see
+https://pdos.csail.mit.edu/papers/dhash:nsdi/paper.pdf).
+
+Q: Is it possible to design a DHT in which lookups take less than
+log(N) hops?
+
+A: There are a number of O(1) hops DHTs, but they require more
+bandwidth. Accordion is one that dynamically adjusts between O(1) and
+O(log N): www.news.cs.nyu.edu/~jinyang/pub/nsdi05-accordion.pdf
+
+Q: Does consistent hashing of keys still guarantee load balanced nodes if keys
+are not evenly distributed?
+
+A: Chord hashes the keys provided by the application using a SHA1 so that the
+keys are well distributed in the key space.
+
+Q: In the case of concurrent joins and failures, Chord pauses when a get fails
+to find the key it was looking for. If there's constant activity, how can Chord
+distinguish between the system not being stable and the key not actually
+existing?
+
+A: The idea is not to wait until the system is stable, because there might never
+be a stable system. Instead, the plan is to just retry after a certain period of
+time, because stabilization may have fix the routing info needed for that
+lookup. With good chance, Chord will go back to case 1 or 2 mentioned in that
+paragraph of the paper.
+
